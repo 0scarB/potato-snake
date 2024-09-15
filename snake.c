@@ -5,8 +5,10 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include <sys/ioctl.h>
 #include <termios.h>
+#include <time.h>
+#include <unistd.h>
 
 #else
 
@@ -23,6 +25,9 @@ int brk(void* ptr);
 
 __attribute__((import_name("wasm_capture_input")))
 int wasm_capture_input(void);
+
+__attribute__((import_name("wasm_get_terminal_dims")))
+size_t wasm_get_terminal_dims(void);
 
 __attribute__((import_name("wasm_terminal_write")))
 void wasm_terminal_write(char* str, int str_len);
@@ -53,7 +58,10 @@ typedef enum direction {
 const int QUIT = 4;
 
 typedef struct state {
+    Vec terminal_dims;
+
     unsigned char* grid;
+    Vec            grid_offset;
     Vec            grid_dims;
 
     Vec snake_head;
@@ -64,17 +72,23 @@ typedef struct state {
 
     Vec food;
 
+    size_t score;
+    Vec    score_pos;
+
+    size_t snake_grow_increment;
     size_t snake_grow_countdown;
 
-    char* terminal_out;
-    char* terminal_out_write_ptr;
-
-#ifndef WASM
-    struct termios orig_terminal_config;
-#endif
+    float update_interval;
 
     size_t do_main_loop_iteration;
     size_t do_teardown;
+
+#ifndef WASM
+    char* terminal_out;
+    char* terminal_out_write_ptr;
+
+    struct termios orig_terminal_config;
+#endif
 } State;
 
 int capture_input(void) {
@@ -97,6 +111,38 @@ int capture_input(void) {
     return -1;
 #else
     return wasm_capture_input();
+#endif
+}
+
+// See man ioctl_tty(2)
+typedef struct ioctl_terminal_winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+} IOCtlTerminalWinsize;
+
+Vec get_terminal_dims(void) {
+#ifndef WASM
+    Vec dims;
+
+    IOCtlTerminalWinsize ioctl_winsize;
+    if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ioctl_winsize) == -1) {
+        // Fallback values
+        dims.x = 80;
+        dims.y = 24;
+    } else {
+        // We need reduce the grid width by 1 to prevent the Gnome terminal
+        // from scrolling when we write to the bottom right corner of the
+        // terminal
+        dims.x = ioctl_winsize.ws_col - 1;
+        dims.y = ioctl_winsize.ws_row;
+    }
+
+    return dims;
+#else
+    size_t packed_dims = wasm_get_terminal_dims();
+    return (Vec) {.x = packed_dims>>16, .y = packed_dims & ((1<<16) - 1)};
 #endif
 }
 
@@ -144,13 +190,18 @@ void terminal_move_cursor(State* state, size_t x, size_t y) {
 #ifndef WASM
     *state->terminal_out_write_ptr++ = '\033';
     *state->terminal_out_write_ptr++ = '[';
-    terminal_write_int(state, y-1);
+    terminal_write_int(state, y+1);
     *state->terminal_out_write_ptr++ = ';';
-    terminal_write_int(state, x-1);
+    terminal_write_int(state, x+1);
     *state->terminal_out_write_ptr++ = 'H';
 #else
     wasm_terminal_move_cursor(x, y);
 #endif
+}
+
+void terminal_move_cursor_to_grid_pos(State* state, Vec pos) {
+    terminal_move_cursor(state, pos.x*2 + state->grid_offset.x,
+                                pos.y   + state->grid_offset.y);
 }
 
 void terminal_flush_out(State* state) {
@@ -286,14 +337,14 @@ State state;
 #ifdef WASM
 __attribute__((export_name("update")))
 #endif
-void update(void) {
+float update(void) {
     if (state.do_main_loop_iteration) {
         state.snake_head_prev_direction = state.snake_head_direction;
         int input = capture_input();
         if (input == QUIT) {
             state.do_main_loop_iteration = 0;
             state.do_teardown = 1;
-            return;
+            return state.update_interval;
         } else if (input != -1) {
             state.snake_head_direction = input;
         }
@@ -301,28 +352,32 @@ void update(void) {
         if (!snake_extend_head(&state)) {
             state.do_main_loop_iteration = 0;
             state.do_teardown = 1;
-            return;
+            return state.update_interval;
         }
 
-        state.terminal_out_write_ptr = state.terminal_out;
-        terminal_move_cursor(&state, state.snake_head.x*2, state.snake_head.y);
+        terminal_move_cursor_to_grid_pos(&state, state.snake_head);
         terminal_write(&state, "██");
 
         if (state.snake_head.x == state.food.x && state.snake_head.y == state.food.y) {
-            state.snake_grow_countdown += 3;
+            state.snake_grow_countdown += state.snake_grow_increment;
+
+            ++state.score;
 
             do {
                 state.food.x = rand()%state.grid_dims.x;
                 state.food.y = rand()%state.grid_dims.y;
             } while (snake_at(&state, state.food));
-            terminal_move_cursor(&state, state.food.x*2, state.food.y);
+            terminal_move_cursor_to_grid_pos(&state, state.food);
             terminal_write(&state, "▓▓");
+
+            terminal_move_cursor(&state, state.score_pos.x, state.score_pos.y);
+            terminal_write_int(&state, state.score);
         }
 
         if (state.snake_grow_countdown == 0) {
             snake_retract_tail(&state);
 
-            terminal_move_cursor(&state, state.snake_tail.x*2, state.snake_tail.y);
+            terminal_move_cursor_to_grid_pos(&state, state.snake_tail);
             terminal_write(&state, "  ");
         } else {
             --state.snake_grow_countdown;
@@ -341,8 +396,12 @@ void update(void) {
         brk(state.grid);
 #endif
     } else /* do setup */ {
-        state.grid_dims.x = 30;
-        state.grid_dims.y = 50;
+        state.terminal_dims = get_terminal_dims();
+
+        state.grid_offset.x = 0;
+        state.grid_offset.y = 1;
+        state.grid_dims.x = (state.terminal_dims.x - state.grid_offset.x)>>1;
+        state.grid_dims.y = (state.terminal_dims.y - state.grid_offset.y);
         state.grid = sbrk(state.grid_dims.x*state.grid_dims.y<<2);
 
         state.snake_head.x = state.grid_dims.x>>1;
@@ -354,12 +413,19 @@ void update(void) {
 
         snake_start(&state, state.snake_head);
 
-        state.snake_grow_countdown = 3;
+        size_t half_circumference = state.terminal_dims.x + state.terminal_dims.y;
 
+        state.snake_grow_increment = half_circumference/30;
+        if (state.snake_grow_increment == 0)
+            state.snake_grow_increment = 1;
+        state.snake_grow_countdown = state.snake_grow_increment;
+
+        state.update_interval = ((float) 10)/((float) half_circumference);
+
+#ifndef WASM
         char  terminal_out[1024];
         state.terminal_out = terminal_out;
         state.terminal_out_write_ptr = state.terminal_out;
-#ifndef WASM
         terminal_clear(&state);
         terminal_hide_cursor(&state);
 #endif
@@ -368,8 +434,17 @@ void update(void) {
             state.food.x = rand()%state.grid_dims.x;
             state.food.y = rand()%state.grid_dims.y;
         } while (snake_at(&state, state.food));
-        terminal_move_cursor(&state, state.food.x*2, state.food.y);
+        terminal_move_cursor_to_grid_pos(&state, state.food);
         terminal_write(&state, "▓▓");
+
+        state.score = 0;
+
+        terminal_move_cursor(&state, 0, 0);
+        terminal_write(&state, "Score: ");
+        terminal_write_int(&state, state.score);
+
+        state.score_pos.x = 7;
+        state.score_pos.y = 0;
 
 #ifndef WASM
         fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
@@ -403,18 +478,29 @@ void update(void) {
         state.do_main_loop_iteration = 1;
         state.do_teardown = 0;
     }
+
+    return state.update_interval;
 }
 
 #ifndef TEST
 //#if 0
 #ifndef WASM
 int main(void) {
-    update();
+    float update_interval = update();
+
+    struct timespec update_deadline;
+    clock_gettime(CLOCK_MONOTONIC, &update_deadline);
 
     while (state.do_main_loop_iteration) {
-        update();
 
-        sleep(1);
+        update_deadline.tv_nsec += update_interval*1e9;
+        while (update_deadline.tv_nsec >= 1e9) {
+            update_deadline.tv_sec  += 1;
+            update_deadline.tv_nsec -= 1e9;
+        }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &update_deadline, NULL);
+
+        update_interval = update();
     }
 
     update();
@@ -504,7 +590,8 @@ int main(void) {
     test_begin("snake movement"); {
         State state;
 
-        state.grid_dims = (Vec) {.x = 7, .y = 7};
+        state.grid_dims   = (Vec) {.x = 7, .y = 7};
+        state.grid_offset = (Vec) {.x = 3, .y = 4};
         unsigned char grid[1024] = {0};
         state.grid = grid;
 

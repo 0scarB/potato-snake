@@ -6,24 +6,25 @@ window.onload = () => {
     let wasm_dyn_mem_ptr   = -1;
     let wasm_dyn_mem_stop  = -1;
 
-    const terminal_width  = 2*30;
-    const terminal_height = 50;
-    let blank_terminal_str = "";
+    const terminal_el            = document.getElementById("terminal");
+    const text_size_reference_el = document.getElementById("text_size_reference");
+    const monospace_text_advance_x = text_size_reference_el.clientWidth /4;
+    const monospace_text_advance_y = text_size_reference_el.clientHeight/4;
+    let terminal_width  = Math.floor(terminal_el.clientWidth /monospace_text_advance_x);
+    let terminal_height = Math.floor(terminal_el.clientHeight/monospace_text_advance_y);
+    let terminal_str = "";
     for (let y = 0; y < terminal_height; ++y) {
         for (let x = 0; x < terminal_width; ++x) {
-            blank_terminal_str += " ";
+            terminal_str += " ";
         }
-        blank_terminal_str += "\n";
+        terminal_str += "\n";
     }
-    let terminal_str = blank_terminal_str;
     let terminal_cursor_x = 0;
     let terminal_cursor_y = 0;
     const terminal_str_idx = () =>
         terminal_cursor_y*(terminal_width + 1) + terminal_cursor_x;
 
     const utf8_text_decoder = new TextDecoder();
-
-    const terminal_el = document.getElementById("terminal");
 
     const UP    = 0;
     const RIGHT = 1;
@@ -68,6 +69,10 @@ window.onload = () => {
                 input = -1;
                 return result;
             },
+            wasm_get_terminal_dims() {
+                const  packed_dims = terminal_width<<16 | terminal_height;
+                return packed_dims;
+            },
             wasm_terminal_write(str_ptr, str_len) {
                 const str = utf8_text_decoder.decode(
                     new Uint8Array(wasm_mem.buffer, str_ptr, str_len));
@@ -79,7 +84,7 @@ window.onload = () => {
                 terminal_str += old_terminal_str.slice(terminal_str_idx());
             },
             wasm_terminal_write_int(x) {
-                const str = parseInt(x);
+                const str = x.toString();
 
                 const old_terminal_str = terminal_str;
                 terminal_str = terminal_str.slice(0, terminal_str_idx());
@@ -103,8 +108,18 @@ window.onload = () => {
         wasm_dyn_mem_ptr   = wasm_dyn_mem_start;
         wasm_dyn_mem_stop  = wasm_dyn_mem_start*WASM_MEM_PAGE_SIZE;
 
-        wasm_inst.exports.update();
-        setInterval(wasm_inst.exports.update, 100);
-        wasm_inst.exports.update();
+        const update = wasm_inst.exports.update;
+        let t0 = performance.now()/1000;
+        let update_interval = update();
+        const mainLoop = () => {
+            const t1 = performance.now()/1000;
+            if (t1 - t0 > update_interval) {
+                t0 = t1;
+                update_interval = update();
+            }
+            requestAnimationFrame(mainLoop);
+        }
+        requestAnimationFrame(mainLoop);
     });
 }
+
