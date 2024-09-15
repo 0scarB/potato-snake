@@ -10,15 +10,10 @@ window.onload = () => {
     const text_size_reference_el = document.getElementById("text_size_reference");
     const monospace_text_advance_x = text_size_reference_el.clientWidth /4;
     const monospace_text_advance_y = text_size_reference_el.clientHeight/4;
-    let terminal_width  = Math.floor(terminal_el.clientWidth /monospace_text_advance_x);
-    let terminal_height = Math.floor(terminal_el.clientHeight/monospace_text_advance_y);
+    const terminal_width  = Math.floor(terminal_el.clientWidth /monospace_text_advance_x);
+    const terminal_height = Math.floor(terminal_el.clientHeight/monospace_text_advance_y);
     let terminal_str = "";
-    for (let y = 0; y < terminal_height; ++y) {
-        for (let x = 0; x < terminal_width; ++x) {
-            terminal_str += " ";
-        }
-        terminal_str += "\n";
-    }
+
     let terminal_cursor_x = 0;
     let terminal_cursor_y = 0;
     const terminal_str_idx = () =>
@@ -26,19 +21,21 @@ window.onload = () => {
 
     const utf8_text_decoder = new TextDecoder();
 
-    const UP    = 0;
-    const RIGHT = 1;
-    const DOWN  = 2;
-    const LEFT  = 3;
-    const QUIT  = 4;
+    const UP     = 0;
+    const RIGHT  = 1;
+    const DOWN   = 2;
+    const LEFT   = 3;
+    const REPLAY = 4;
+    const QUIT   = 5;
     let input = -1;
     window.addEventListener("keydown", (event) => {
         switch (event.key) {
-            case "w": input = UP   ; break;
-            case "a": input = LEFT ; break;
-            case "s": input = DOWN ; break;
-            case "d": input = RIGHT; break;
-            case "q": input = QUIT ; break;
+            case "w": input = UP    ; break;
+            case "a": input = LEFT  ; break;
+            case "s": input = DOWN  ; break;
+            case "d": input = RIGHT ; break;
+            case "r": input = REPLAY; break;
+            case "q": input = QUIT  ; break;
         }
     });
 
@@ -99,6 +96,17 @@ window.onload = () => {
             wasm_terminal_flush_out() {
                 terminal_el.innerHTML = terminal_str;
             },
+            wasm_terminal_clear() {
+                terminal_str = "";
+                for (let y = 0; y < terminal_height; ++y) {
+                    for (let x = 0; x < terminal_width; ++x) {
+                        terminal_str += " ";
+                    }
+                    terminal_str += "\n";
+                }
+                terminal_cursor_x = 0;
+                terminal_cursor_y = 0;
+            }
         }},
     ).then(result => {
         const wasm_inst = result.instance;

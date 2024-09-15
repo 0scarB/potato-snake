@@ -41,6 +41,9 @@ void wasm_terminal_move_cursor(size_t x, size_t y);
 __attribute__((import_name("wasm_terminal_flush_out")))
 void wasm_terminal_flush_out(void);
 
+__attribute__((import_name("wasm_terminal_clear")))
+void wasm_terminal_clear(void);
+
 #endif
 
 typedef struct vec {
@@ -54,8 +57,16 @@ typedef enum direction {
     DOWN  = 2,
     LEFT  = 3,
 } Direction;
+const int REPLAY = 4;
+const int QUIT   = 5;
 
-const int QUIT = 4;
+typedef enum out_of_game_task {
+    SETUP                         = 0,
+    RESET                         = 1,
+    END_SCREEN                    = 2,
+    WAIT_FOR_REPLAY_OR_QUIT_INPUT = 3,
+    TEARDOWN                      = 4,
+} OutOfGameTask;
 
 typedef struct state {
     Vec terminal_dims;
@@ -80,8 +91,8 @@ typedef struct state {
 
     float update_interval;
 
-    size_t do_main_loop_iteration;
-    size_t do_teardown;
+    size_t do_in_game_update;
+    OutOfGameTask out_of_game_task;
 
 #ifndef WASM
     char* terminal_out;
@@ -103,6 +114,7 @@ int capture_input(void) {
                 case 'a': return LEFT;
                 case 's': return DOWN;
                 case 'd': return RIGHT;
+                case 'r': return REPLAY;
                 case 'q': return QUIT;
             }
         }
@@ -215,13 +227,18 @@ void terminal_flush_out(State* state) {
 #endif
 }
 
-#ifndef WASM
 void terminal_clear(State* state) {
+#ifndef WASM
     *state->terminal_out_write_ptr++ = '\033';
     *state->terminal_out_write_ptr++ = '[';
     *state->terminal_out_write_ptr++ = '2';
     *state->terminal_out_write_ptr++ = 'J';
+#else
+    wasm_terminal_clear();
+#endif
 }
+
+#ifndef WASM
 
 void terminal_hide_cursor(State* state) {
     *state->terminal_out_write_ptr++ = '\033';
@@ -338,20 +355,20 @@ State state;
 __attribute__((export_name("update")))
 #endif
 float update(void) {
-    if (state.do_main_loop_iteration) {
+    if (state.do_in_game_update) {
         state.snake_head_prev_direction = state.snake_head_direction;
         int input = capture_input();
         if (input == QUIT) {
-            state.do_main_loop_iteration = 0;
-            state.do_teardown = 1;
+            state.do_in_game_update = 0;
+            state.out_of_game_task = TEARDOWN;
             return state.update_interval;
         } else if (input != -1) {
             state.snake_head_direction = input;
         }
 
         if (!snake_extend_head(&state)) {
-            state.do_main_loop_iteration = 0;
-            state.do_teardown = 1;
+            state.do_in_game_update = 0;
+            state.out_of_game_task = END_SCREEN;
             return state.update_interval;
         }
 
@@ -384,99 +401,140 @@ float update(void) {
         }
 
         terminal_flush_out(&state);
-    } else if (state.do_teardown) {
-        terminal_flush_out(&state);
-
+    } else {
+        switch (state.out_of_game_task) {
+            case SETUP: {
 #ifndef WASM
-        terminal_restore_cursor(&state);
-        terminal_flush_out(&state);
+                fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 
-        tcsetattr(STDIN_FILENO, TCSANOW, &state.orig_terminal_config);
-
-        brk(state.grid);
+                struct termios new_terminal_config;
+                tcgetattr(STDIN_FILENO, &state.orig_terminal_config);
+                new_terminal_config = state.orig_terminal_config;
+                {
+                    // Don't ignore carriage return or do mapping betwen carriage return
+                    // and newline
+                    new_terminal_config.c_iflag &= ~(IGNCR | ICRNL | INLCR);
+                    // Don't strip input characters to 7 bits
+                    new_terminal_config.c_iflag &= ~ISTRIP;
+                    // Disable parity checking and errors
+                    new_terminal_config.c_iflag &= ~(INPCK | PARMRK);
+                    // Don't do output processing
+                    new_terminal_config.c_oflag &= ~OPOST;
+                    // Disable echoing of input character back to output
+                    new_terminal_config.c_lflag &= ~(ECHO | ECHOE | ECHONL);
+                    // Enable "canonical" mode, disabling input buffering
+                    new_terminal_config.c_lflag &= ~ICANON;
+                    // See General Terminal Interface, POSIX, IEEE Std 1003.1-2024,
+                    // https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html
+                    // for more info.
+                }
+                tcsetattr(STDIN_FILENO, TCSANOW, &new_terminal_config);
 #endif
-    } else /* do setup */ {
-        state.terminal_dims = get_terminal_dims();
+            }; /* FALLTHROUGH! */
+            case RESET: {
+                state.terminal_dims = get_terminal_dims();
 
-        state.grid_offset.x = 0;
-        state.grid_offset.y = 1;
-        state.grid_dims.x = (state.terminal_dims.x - state.grid_offset.x)>>1;
-        state.grid_dims.y = (state.terminal_dims.y - state.grid_offset.y);
-        state.grid = sbrk(state.grid_dims.x*state.grid_dims.y<<2);
+                state.grid_offset.x = 0;
+                state.grid_offset.y = 1;
+                state.grid_dims.x = (state.terminal_dims.x - state.grid_offset.x)>>1;
+                state.grid_dims.y = (state.terminal_dims.y - state.grid_offset.y);
+                size_t grid_size = state.grid_dims.x*state.grid_dims.y<<2;
+                state.grid = sbrk(grid_size);
+                for (size_t i = 0; i < grid_size; ++i) {
+                    state.grid[i] = 0;
+                }
 
-        state.snake_head.x = state.grid_dims.x>>1;
-        state.snake_head.y = state.grid_dims.y>>1;
-        state.snake_tail = state.snake_head;
-        state.snake_head_prev_direction = RIGHT;
-        state.snake_head_direction      = RIGHT;
-        state.snake_tail_direction      = RIGHT;
+                state.snake_head.x = state.grid_dims.x>>1;
+                state.snake_head.y = state.grid_dims.y>>1;
+                state.snake_tail = state.snake_head;
+                state.snake_head_prev_direction = RIGHT;
+                state.snake_head_direction      = RIGHT;
+                state.snake_tail_direction      = RIGHT;
 
-        snake_start(&state, state.snake_head);
+                snake_start(&state, state.snake_head);
 
-        size_t half_circumference = state.terminal_dims.x + state.terminal_dims.y;
+                size_t half_circumference = state.terminal_dims.x + state.terminal_dims.y;
 
-        state.snake_grow_increment = half_circumference/30;
-        if (state.snake_grow_increment == 0)
-            state.snake_grow_increment = 1;
-        state.snake_grow_countdown = state.snake_grow_increment;
+                state.snake_grow_increment = half_circumference/30;
+                if (state.snake_grow_increment == 0)
+                    state.snake_grow_increment = 1;
+                state.snake_grow_countdown = state.snake_grow_increment;
 
-        state.update_interval = ((float) 10)/((float) half_circumference);
+                state.update_interval = ((float) 10)/((float) half_circumference);
 
 #ifndef WASM
-        char  terminal_out[1024];
-        state.terminal_out = terminal_out;
-        state.terminal_out_write_ptr = state.terminal_out;
-        terminal_clear(&state);
-        terminal_hide_cursor(&state);
+                char  terminal_out[1024];
+                state.terminal_out = terminal_out;
+                state.terminal_out_write_ptr = state.terminal_out;
+                terminal_hide_cursor(&state);
 #endif
+                terminal_clear(&state);
 
-        do {
-            state.food.x = rand()%state.grid_dims.x;
-            state.food.y = rand()%state.grid_dims.y;
-        } while (snake_at(&state, state.food));
-        terminal_move_cursor_to_grid_pos(&state, state.food);
-        terminal_write(&state, "▓▓");
+                do {
+                    state.food.x = rand()%state.grid_dims.x;
+                    state.food.y = rand()%state.grid_dims.y;
+                } while (snake_at(&state, state.food));
+                terminal_move_cursor_to_grid_pos(&state, state.food);
+                terminal_write(&state, "▓▓");
 
-        state.score = 0;
+                state.score = 0;
 
-        terminal_move_cursor(&state, 0, 0);
-        terminal_write(&state, "Score: ");
-        terminal_write_int(&state, state.score);
+                terminal_move_cursor(&state, 0, 0);
+                terminal_write(&state, "Score: ");
+                terminal_write_int(&state, state.score);
 
-        state.score_pos.x = 7;
-        state.score_pos.y = 0;
+                state.score_pos.x = 7;
+                state.score_pos.y = 0;
 
+                terminal_flush_out(&state);
+
+                state.do_in_game_update = 1;
+            }; break;
+            case END_SCREEN: {
+                size_t x = (state.terminal_dims.x>>1) - 8;
+                size_t y = (state.terminal_dims.y>>1) - 3;
+                terminal_move_cursor(&state, x, y);
+                terminal_write(&state, "   GAME OVER!   ");
+                terminal_move_cursor(&state, x, y + 1);
+                terminal_write(&state, "                ");
+                terminal_move_cursor(&state, x, y + 2);
+                terminal_write(&state, " Final Score: ");
+                terminal_write_int(&state, state.score);
+                terminal_write(&state, " ");
+                terminal_move_cursor(&state, x, y + 3);
+                terminal_write(&state, "                ");
+                terminal_move_cursor(&state, x, y + 4);
+                terminal_write(&state, "    r=replay    ");
 #ifndef WASM
-        fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+                terminal_move_cursor(&state, x, y + 5);
+                terminal_write(&state, "    q=quit      ");
+#endif
+                terminal_flush_out(&state);
 
-        struct termios new_terminal_config;
-        tcgetattr(STDIN_FILENO, &state.orig_terminal_config);
-        new_terminal_config = state.orig_terminal_config;
-        {
-            // Don't ignore carriage return or do mapping betwen carriage return
-            // and newline
-            new_terminal_config.c_iflag &= ~(IGNCR | ICRNL | INLCR);
-            // Don't strip input characters to 7 bits
-            new_terminal_config.c_iflag &= ~ISTRIP;
-            // Disable parity checking and errors
-            new_terminal_config.c_iflag &= ~(INPCK | PARMRK);
-            // Don't do output processing
-            new_terminal_config.c_oflag &= ~OPOST;
-            // Disable echoing of input character back to output
-            new_terminal_config.c_lflag &= ~(ECHO | ECHOE | ECHONL);
-            // Enable "canonical" mode, disabling input buffering
-            new_terminal_config.c_lflag &= ~ICANON;
-            // See General Terminal Interface, POSIX, IEEE Std 1003.1-2024,
-            // https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap11.html
-            // for more info.
+                state.out_of_game_task = WAIT_FOR_REPLAY_OR_QUIT_INPUT;
+                brk(state.grid);
+                state.update_interval = 0.001;
+            }; break;
+            case WAIT_FOR_REPLAY_OR_QUIT_INPUT: {
+                switch (capture_input()) {
+                    case REPLAY: state.out_of_game_task = RESET   ; break;
+#ifndef WASM
+                    case QUIT  : state.out_of_game_task = TEARDOWN; break;
+#endif
+                }
+            }; break;
+            case TEARDOWN: {
+                brk(state.grid);
+#ifndef WASM
+                terminal_move_cursor(&state, state.terminal_dims.x-1,
+                                             state.terminal_dims.y-1);
+                terminal_restore_cursor(&state);
+                terminal_flush_out(&state);
+
+                tcsetattr(STDIN_FILENO, TCSANOW, &state.orig_terminal_config);
+#endif
+            }; break;
         }
-        tcsetattr(STDIN_FILENO, TCSANOW, &new_terminal_config);
-#endif
-
-        terminal_flush_out(&state);
-
-        state.do_main_loop_iteration = 1;
-        state.do_teardown = 0;
     }
 
     return state.update_interval;
@@ -491,7 +549,7 @@ int main(void) {
     struct timespec update_deadline;
     clock_gettime(CLOCK_MONOTONIC, &update_deadline);
 
-    while (state.do_main_loop_iteration) {
+    while (state.do_in_game_update || state.out_of_game_task != TEARDOWN) {
 
         update_deadline.tv_nsec += update_interval*1e9;
         while (update_deadline.tv_nsec >= 1e9) {
