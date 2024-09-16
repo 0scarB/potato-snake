@@ -67,12 +67,12 @@ window.onload = () => {
     let input = -1;
     window.addEventListener("keydown", (event) => {
         switch (event.key) {
-            case "w": input = UP    ; break;
-            case "a": input = LEFT  ; break;
-            case "s": input = DOWN  ; break;
-            case "d": input = RIGHT ; break;
-            case "r": input = REPLAY; break;
-            case "q": input = QUIT  ; break;
+            case 'w': case 'k': input = UP    ; break;
+            case 'a': case 'h': input = LEFT  ; break;
+            case 's': case 'j': input = DOWN  ; break;
+            case 'd': case 'l': input = RIGHT ; break;
+            case 'r':           input = REPLAY; break;
+            case 'q':           input = QUIT  ; break;
         }
     });
 

@@ -110,12 +110,12 @@ int capture_input(void) {
         for (size_t i = 0; i < n; ++i) {
             char c = input_buf[i];
             switch (c) {
-                case 'w': return UP;
-                case 'a': return LEFT;
-                case 's': return DOWN;
-                case 'd': return RIGHT;
-                case 'r': return REPLAY;
-                case 'q': return QUIT;
+                case 'w': case 'k': return UP;
+                case 'a': case 'h': return LEFT;
+                case 's': case 'j': return DOWN;
+                case 'd': case 'l': return RIGHT;
+                case 'r':           return REPLAY;
+                case 'q':           return QUIT;
             }
         }
     }
@@ -209,6 +209,23 @@ void terminal_move_cursor(State* state, size_t x, size_t y) {
 #else
     wasm_terminal_move_cursor(x, y);
 #endif
+}
+
+void terminal_write_multiline(State* state, size_t x, size_t y, char* str) {
+    terminal_move_cursor(state, x, y);
+    while (*str != '\0') {
+#ifndef WASM
+        while (*str != '\n' && *str != '\0')
+            *state->terminal_out_write_ptr++ = *str++;
+#else
+        size_t str_len = 0;
+        while (str[str_len] != '\n' && *str != '\n')
+            ++str_len;
+        wasm_terminal_write(str, str_len);
+#endif
+        ++y;
+        terminal_move_cursor(state, x, y);
+    }
 }
 
 void terminal_move_cursor_to_grid_pos(State* state, Vec pos) {
@@ -359,9 +376,11 @@ float update(void) {
         state.snake_head_prev_direction = state.snake_head_direction;
         int input = capture_input();
         if (input == QUIT) {
+#ifndef WASM
             state.do_in_game_update = 0;
             state.out_of_game_task = TEARDOWN;
             return state.update_interval;
+#endif
         } else if (input != -1) {
             state.snake_head_direction = input;
         }
@@ -444,14 +463,27 @@ float update(void) {
                     state.grid[i] = 0;
                 }
 
-                state.snake_head.x = state.grid_dims.x>>1;
-                state.snake_head.y = state.grid_dims.y>>1;
+#ifndef WASM
+                char  terminal_out[1024];
+                state.terminal_out = terminal_out;
+                state.terminal_out_write_ptr = state.terminal_out;
+                terminal_hide_cursor(&state);
+#endif
+                terminal_clear(&state);
+
+                state.snake_head.x = (state.grid_dims.x>>1) - 5;
+                state.snake_head.y =  state.grid_dims.y>>1;
                 state.snake_tail = state.snake_head;
                 state.snake_head_prev_direction = RIGHT;
                 state.snake_head_direction      = RIGHT;
                 state.snake_tail_direction      = RIGHT;
 
                 snake_start(&state, state.snake_head);
+                terminal_move_cursor_to_grid_pos(&state, state.snake_head);
+                terminal_write(&state, "              move with wasd/hjkl");
+#ifndef WASM
+                terminal_write(&state, "; q to quit");
+#endif
 
                 size_t half_circumference = state.terminal_dims.x + state.terminal_dims.y;
 
@@ -461,14 +493,6 @@ float update(void) {
                 state.snake_grow_countdown = state.snake_grow_increment;
 
                 state.update_interval = ((float) 10)/((float) half_circumference);
-
-#ifndef WASM
-                char  terminal_out[1024];
-                state.terminal_out = terminal_out;
-                state.terminal_out_write_ptr = state.terminal_out;
-                terminal_hide_cursor(&state);
-#endif
-                terminal_clear(&state);
 
                 do {
                     state.food.x = rand()%state.grid_dims.x;
@@ -495,18 +519,18 @@ float update(void) {
                 size_t y = (state.terminal_dims.y>>1) - 3;
                 terminal_move_cursor(&state, x, y);
                 terminal_write(&state, "   GAME OVER!   ");
-                terminal_move_cursor(&state, x, y + 1);
+                terminal_move_cursor(&state, x, ++y);
                 terminal_write(&state, "                ");
-                terminal_move_cursor(&state, x, y + 2);
+                terminal_move_cursor(&state, x, ++y);
                 terminal_write(&state, " Final Score: ");
                 terminal_write_int(&state, state.score);
                 terminal_write(&state, " ");
-                terminal_move_cursor(&state, x, y + 3);
+                terminal_move_cursor(&state, x, ++y);
                 terminal_write(&state, "                ");
-                terminal_move_cursor(&state, x, y + 4);
+                terminal_move_cursor(&state, x, ++y);
                 terminal_write(&state, "    r=replay    ");
 #ifndef WASM
-                terminal_move_cursor(&state, x, y + 5);
+                terminal_move_cursor(&state, x, ++y);
                 terminal_write(&state, "    q=quit      ");
 #endif
                 terminal_flush_out(&state);
